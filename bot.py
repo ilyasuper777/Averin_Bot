@@ -4,8 +4,10 @@ import os
 import paramiko
 from pathlib import Path
 from telegram import Update, ForceReply
-from telegram.ext import Updater, CommandHandler,MessageHandler, Filters, ConversationHandler
+from telegram.ext import Updater, CommandHandler, CallbackContext,MessageHandler, Filters, ConversationHandler
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2 import Error
 
 load_dotenv()
 host = os.getenv('RM_HOST')
@@ -152,7 +154,17 @@ def get_services_Command(update: Update, context):
     for text in msgs:
         update.message.reply_text(text=text)
     #update.message.reply_text(data)
-    
+
+def get_repl_logs_Command(update: Update, context):
+    client.connect(hostname=host, username=username, password=password, port=port)
+    stdin, stdout, stderr = client.exec_command('cat /var/log/postgresql/postgresql-12-main.log | grep -a replication')
+    data = stdout.read() + stderr.read()
+    client.close()
+    data = str(data).replace('\\n', '\n').replace('\\t', '\t')[2:-1]
+    msgs = [data[i:i + 4096] for i in range(0, len(data), 4096)]
+    for text in msgs:
+        update.message.reply_text(text=text)
+    #update.message.reply_text(data) 
 
 def findPhoneNumbersCommand(update: Update, context):
     update.message.reply_text('Введите текст для поиска телефонных номеров: ')
@@ -167,16 +179,54 @@ def find_phone_number(update: Update, context):
 
     if not phoneNumberList: # Обрабатываем случай, когда email нет
         update.message.reply_text('Телефон(ы) не были найдены')
-        return # Завершаем выполнение функции
-    
-    phoneNumbers = '' # Создаем строку, в которую будем записывать номера телефонов
+        return ConversationHandler.END # Завершаем работу обработчика диалога
+    NewphoneNumberList = []
     for i in range(len(phoneNumberList)):
-        phoneNumbers += f'{i+1}. {phoneNumberList[i]}\n' # Записываем очередной номер
+        phoneNumberList[i] = phoneNumberList[i].replace("+7", "8", 1)
+        phoneNumberList[i] = phoneNumberList[i].replace("-", "")
+        phoneNumberList[i] = phoneNumberList[i].replace("(", "")
+        phoneNumberList[i] = phoneNumberList[i].replace(")", "")
+        phoneNumberList[i] = phoneNumberList[i].replace(" ", "")
+        NewphoneNumberList.append(phoneNumberList[i])
+    phoneNumberList = set(NewphoneNumberList)
     
-    update.message.reply_text(phoneNumbers) # Отправляем сообщение пользователю
+    phoneNumber = '' # Создаем строку, в которую будем записывать email
+    i = 0
+    for j in phoneNumberList:
+        i +=1
+        phoneNumber += f'{i}. {j}\n' # Записываем очередной email
+    update.message.reply_text(phoneNumber+"\nЗаписать телефон(ы) в Базу данных?\nНапишите 'Да' без ковычек, если согласны, в противном случае информация не запишится.") # Отправляем сообщение пользователю
+    context.user_data['phoneNumberList'] = phoneNumberList
+    return "save_PhoneNumbers"
+
+def save_PhoneNumbers(update: Update, context: CallbackContext) -> int:
+    user_input = update.message.text
+    if user_input == "Да":
+        connection = None
+        try:
+            connection = psycopg2.connect(user=os.getenv("DB_USER"),
+                                        password=os.getenv("DB_PASSWORD"),
+                                        host=os.getenv("DB_HOST"),
+                                        port=os.getenv("DB_PORT"), 
+                                        database=os.getenv("DB_DATABASE"))
+            cursor = connection.cursor()
+            phoneNumberList = context.user_data.get('phoneNumberList',[])
+            for i in phoneNumberList:
+                cursor.execute(f"INSERT INTO phonenumbers (Value) VALUES ('{i}');")
+            connection.commit()
+            update.message.reply_text("Команда успешно выполнена")
+            logging.info("Команда успешно выполнена")
+        except (Exception, Error) as error:
+            update.message.reply_text("Ошибка при работе с PostgreSQL")
+            logging.error("Ошибка при работе с PostgreSQL: %s", error)
+        finally:
+            if connection is not None:
+                cursor.close()
+                connection.close()
+                logging.info("Соединение с PostgreSQL закрыто")
+    else:
+        update.message.reply_text("Данные не записаны, т.к. вы отказались")
     return ConversationHandler.END # Завершаем работу обработчика диалога
-
-
 
 def findEmailCommand(update: Update, context):
     update.message.reply_text('Введите текст для поиска Email-адресов: ')
@@ -190,13 +240,46 @@ def find_Email(update: Update, context):
 
     if not EmailList: # Обрабатываем случай, когда email нет
         update.message.reply_text('Email-адреса не были найдены')
-        return # Завершаем работу обработчика диалога
-    
+        return ConversationHandler.END # Завершаем работу обработчика диалога
     Email = '' # Создаем строку, в которую будем записывать email
-    for i in range(len(EmailList)):
-        Email += f'{i+1}. {EmailList[i]}\n'
+    EmailList = set(EmailList)
+    i = 0
+    for j in EmailList:
+        i+=1
+        Email += f'{i}. {j}\n' # Записываем очередной email
+    update.message.reply_text(Email+"\nЗаписать email-адрес(а) в Базу данных?\nНапишите 'Да' без ковычек, если согласны, в противном случае информация не запишится.") # Отправляем сообщение пользователю
+    context.user_data['EmailList'] = EmailList
+    return "save_Email"
     
-    update.message.reply_text(Email) # Отправляем сообщение пользователю
+
+def save_Email(update: Update, context: CallbackContext) -> int:
+    user_input = update.message.text
+    if user_input == "Да":
+        connection = None
+        try:
+            connection = psycopg2.connect(user=os.getenv("DB_USER"),
+                                        password=os.getenv("DB_PASSWORD"),
+                                        host=os.getenv("DB_HOST"),
+                                        port=os.getenv("DB_PORT"), 
+                                        database=os.getenv("DB_DATABASE"))
+
+            cursor = connection.cursor()
+            EmailList = context.user_data.get('EmailList',[])
+            for i in EmailList:
+                cursor.execute(f"INSERT INTO emails (Value) VALUES ('{i}');")
+            connection.commit()
+            update.message.reply_text("Команда успешно выполнена")
+            logging.info("Команда успешно выполнена")
+        except (Exception, Error) as error:
+            update.message.reply_text("Ошибка при работе с PostgreSQL")
+            logging.error("Ошибка при работе с PostgreSQL: %s", error)
+        finally:
+            if connection is not None:
+                cursor.close()
+                connection.close()
+                logging.info("Соединение с PostgreSQL закрыто")
+    else:
+        update.message.reply_text("Данные не записаны, т.к. вы отказались")
     return ConversationHandler.END # Завершаем работу обработчика диалога
 
 def verify_passwordCommand(update: Update, context):
@@ -214,6 +297,64 @@ def verify_password(update: Update, context):
         update.message.reply_text('Пароль сложный')
     return ConversationHandler.END # Завершаем работу обработчика диалога
 
+def get_emails_logs_Command(update: Update, context):
+    connection = None
+    try:
+        connection = psycopg2.connect(user=os.getenv("DB_USER"),
+                                        password=os.getenv("DB_PASSWORD"),
+                                        host=os.getenv("DB_HOST"),
+                                        port=os.getenv("DB_PORT"), 
+                                        database=os.getenv("DB_DATABASE"))
+
+        cursor = connection.cursor()
+        cursor.execute("SELECT * FROM emails;")
+        data = cursor.fetchall()
+        reply = ""
+        i = 0
+        for row in data:
+            i +=1
+            reply += f"{i}. {row[1]}\n"
+        reply=reply[:-1]
+        update.message.reply_text(reply)
+        logging.info("Команда успешно выполнена")
+    except (Exception, Error) as error:
+        update.message.reply_text("Данных нет или произошла проблема при работе с базой данных!")
+        logging.error("Ошибка при работе с PostgreSQL: %s", error)
+    finally:
+        if connection is not None:
+            cursor.close()
+            connection.close()
+        pass
+
+def get_phone_numbers_Command(update: Update, context):
+    connection = None
+    try:
+        connection = psycopg2.connect(user=os.getenv("DB_USER"),
+                                        password=os.getenv("DB_PASSWORD"),
+                                        host=os.getenv("DB_HOST"),
+                                        port=os.getenv("DB_PORT"), 
+                                        database=os.getenv("DB_DATABASE"))
+
+        cursor = connection.cursor()
+        cursor.execute("SELECT * FROM phonenumbers;")
+        data = cursor.fetchall()
+        reply = ""
+        i = 0
+        for row in data:
+            i += 1
+            reply += f"{i}. {row[1]}\n"
+        reply=reply[:-1]
+        update.message.reply_text(reply)
+        logging.info("Команда успешно выполнена")
+    except (Exception, Error) as error:
+        update.message.reply_text("Данных нет или произошла проблема при работе с базой данных!")
+        logging.error("Ошибка при работе с PostgreSQL: %s", error)
+    finally:
+        if connection is not None:
+            cursor.close()
+            connection.close()
+        pass
+
 def echo(update: Update, context):
     update.message.reply_text(update.message.text)
 
@@ -227,7 +368,8 @@ def main():
     convHandlerFindPhoneNumbers = ConversationHandler(
         entry_points=[CommandHandler('find_phone_number', findPhoneNumbersCommand)],
         states={
-            'find_phone_number': [MessageHandler(Filters.text & ~Filters.command, find_phone_number)]
+            'find_phone_number': [MessageHandler(Filters.text & ~Filters.command, find_phone_number)],
+            'save_PhoneNumbers': [MessageHandler(Filters.text & ~Filters.command, save_PhoneNumbers)],
         },
         fallbacks=[]
     )
@@ -235,7 +377,8 @@ def main():
     convHandlerFindEmail = ConversationHandler(
         entry_points=[CommandHandler('find_Email', findEmailCommand)],
         states={
-            'find_Email': [MessageHandler(Filters.text & ~Filters.command, find_Email)]
+            'find_Email': [MessageHandler(Filters.text & ~Filters.command, find_Email)],
+            'save_Email': [MessageHandler(Filters.text & ~Filters.command, save_Email)]
         },
         fallbacks=[]
     )
@@ -271,6 +414,9 @@ def main():
     dp.add_handler(CommandHandler("get_ps", get_ps_Command))
     dp.add_handler(CommandHandler("get_ss", get_ss_Command))
     dp.add_handler(CommandHandler("get_services", get_services_Command))
+    dp.add_handler(CommandHandler("get_repl_logs", get_repl_logs_Command))
+    dp.add_handler(CommandHandler("get_emails", get_emails_logs_Command))
+    dp.add_handler(CommandHandler("get_phone_numbers", get_phone_numbers_Command))
     dp.add_handler(convHandlerFindPhoneNumbers)
     dp.add_handler(convHandlerFindEmail)
     dp.add_handler(convHandlerVerifyPassword)

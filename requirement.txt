@@ -1,0 +1,4 @@
+pathlib
+python-dotenv
+psycopg2
+paramiko
